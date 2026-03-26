@@ -187,48 +187,45 @@ def push_to_github() -> bool:
     """
     print("\n📤 PUSHING TO GITHUB")
     print("-" * 40)
-
+    
     # Настраиваем Git
-    subprocess.run(['git', 'config', '--local', 'user.email', 'github-actions[bot]@users.noreply.github.com'],
+    subprocess.run(['git', 'config', '--local', 'user.email', 'github-actions[bot]@users.noreply.github.com'], 
                    capture_output=True)
-    subprocess.run(['git', 'config', '--local', 'user.name', 'github-actions[bot]'],
+    subprocess.run(['git', 'config', '--local', 'user.name', 'github-actions[bot]'], 
                    capture_output=True)
-
-    # Добавляем файл
-    result = subprocess.run(['git', 'add', 'subscriptions/whitelist_top15.txt'],
-                            capture_output=True)
-    if result.returncode != 0:
-        print("❌ Failed to add file to git")
-        return False
-
+    
+    # Принудительно добавляем файл
+    subprocess.run(['git', 'add', '-f', 'subscriptions/whitelist_top25.txt'], capture_output=True)
+    
     # Проверяем, есть ли изменения
     result = subprocess.run(['git', 'diff', '--cached', '--quiet'])
     if result.returncode == 0:
-        print("ℹ️ No changes to commit")
-        return True
-
+        print("ℹ️ No changes detected, forcing update...")
+        # Принудительное обновление timestamp
+        with open("subscriptions/whitelist_top25.txt", 'a', encoding='utf-8') as f:
+            f.write(f"# Force update at {datetime.now()}\n")
+        subprocess.run(['git', 'add', '-f', 'subscriptions/whitelist_top25.txt'], capture_output=True)
+    
     # Коммитим
     commit_msg = f'Auto-update {datetime.now().strftime("%Y-%m-%d %H:%M")}'
     result = subprocess.run(['git', 'commit', '-m', commit_msg], capture_output=True)
     if result.returncode != 0:
-        print(f"❌ Failed to commit: {result.stderr.decode() if result.stderr else 'unknown error'}")
-        return False
-    print(f"✅ Committed: {commit_msg}")
-
+        print(f"⚠️ Commit may have failed: {result.stderr.decode() if result.stderr else 'unknown'}")
+    
     # Стягиваем последние изменения с GitHub (важно!)
     print("🔄 Pulling latest changes...")
     result = subprocess.run(['git', 'pull', '--rebase'], capture_output=True)
     if result.returncode != 0:
         print(f"⚠️ Warning: git pull had issues: {result.stderr.decode() if result.stderr else 'unknown'}")
         # Продолжаем, возможно конфликтов нет
-
+    
     # Пушим
     print("📤 Pushing to GitHub...")
     result = subprocess.run(['git', 'push'], capture_output=True)
     if result.returncode != 0:
         print(f"❌ Failed to push: {result.stderr.decode() if result.stderr else 'unknown error'}")
         return False
-
+    
     print("✅ Pushed to GitHub successfully!")
     return True
 
