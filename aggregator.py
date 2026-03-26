@@ -114,7 +114,7 @@ def collect_configs() -> list:
     return all_configs
 
 
-def test_configs(configs: list, max_to_test: int = 500) -> list:
+def test_configs(configs: list, max_to_test: int = 300) -> list:
     """
     Тестирует задержку конфигураций
     Возвращает список работающих, отсортированный по задержке
@@ -162,7 +162,7 @@ def save_subscription(configs: list, max_count: int = 25) -> Path:
 
     with open(filepath, 'w', encoding='utf-8') as f:
         # Заголовок подписки
-        f.write("# profile-title: 🏳️ WhiteList VPN - Top 15\n")
+        f.write("# profile-title: 🏳️ WhiteList VPN - Top 25\n")
         f.write("# profile-update-interval: 1\n")
         f.write(f"# Date/Time: {datetime.now().strftime('%Y-%m-%d / %H:%M')}\n")
         f.write(f"# Total tested: {len(configs)}\n")
