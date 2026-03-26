@@ -20,12 +20,19 @@ jobs:
       with:
         python-version: '3.11'
         
-    - name: Install dependencies
+    - name: Debug - show Python version and files
       run: |
         python --version
-        python -m pip install --upgrade pip
-        python -m pip install requests
-        python -c "import requests; print('requests installed successfully')"
+        pip --version
+        echo "Files in repository:"
+        ls -la
+        echo "First 10 lines of aggregator.py:"
+        head -10 aggregator.py
+        
+    - name: Install dependencies
+      run: |
+        pip install requests
+        pip list | grep requests
         
     - name: Run aggregator
       run: |
