@@ -22,8 +22,11 @@ jobs:
         
     - name: Install dependencies
       run: |
+        python --version
         python -m pip install --upgrade pip
-        pip install requests
+        python -m pip install requests
+        python -c "import requests; print('requests installed successfully')"
         
     - name: Run aggregator
-      run: python aggregator.py
+      run: |
+        python aggregator.py
