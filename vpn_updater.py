@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
 VPN Config Validator & Subscription Updater
-Автоматическая проверка конфигураций и создание подписок
+Проверяет конфигурации и оставляет только 10 с наименьшим пингом
 """
 
 import asyncio
 import aiohttp
-import json
-import re
-import subprocess
+import socket
 import time
 import logging
 import argparse
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
+import json
+import base64
 
 # Настройка логирования
 logging.basicConfig(
@@ -30,6 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class VPNConfig:
     """Класс для хранения информации о конфигурации"""
@@ -41,346 +42,333 @@ class VPNConfig:
     is_alive: bool = False
     latency: float = float('inf')
     country: str = "Unknown"
-    speed: float = 0.0
+
+    def __lt__(self, other):
+        return self.latency < other.latency
+
 
 class VPNConfigValidator:
     """Класс для проверки работоспособности VPN конфигураций"""
-    
-    def __init__(self, timeout: int = 10, test_url: str = "https://www.google.com"):
+
+    def __init__(self, timeout: int = 5, test_count: int = 3):
         self.timeout = timeout
-        self.test_url = test_url
-        self.results: List[VPNConfig] = []
-        
+        self.test_count = test_count  # Количество попыток для усреднения
+
     def parse_config(self, line: str) -> Optional[VPNConfig]:
         """Парсинг строки конфигурации"""
         line = line.strip()
         if not line or line.startswith('#'):
             return None
-            
+
         try:
-            # Определяем протокол
+            # VLESS протокол
             if line.startswith('vless://'):
                 protocol = 'vless'
-                # Парсим URL
                 parsed = urllib.parse.urlparse(line)
                 host = parsed.hostname
                 port = parsed.port
+
                 # Извлекаем имя из фрагмента (#)
-                name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else f"{host}:{port}"
+                if parsed.fragment:
+                    name = urllib.parse.unquote(parsed.fragment)
+                else:
+                    # Пытаемся извлечь из параметров
+                    name = f"{host}:{port}"
+
+                return VPNConfig(
+                    raw=line,
+                    protocol=protocol,
+                    host=host,
+                    port=port,
+                    name=name
+                )
+
+            # VMess протокол
             elif line.startswith('vmess://'):
                 protocol = 'vmess'
-                # Для VMess нужно декодировать base64
                 try:
-                    import base64
                     decoded = base64.b64decode(line[8:]).decode('utf-8')
                     vmess_data = json.loads(decoded)
                     host = vmess_data.get('add', 'unknown')
                     port = vmess_data.get('port', 0)
                     name = vmess_data.get('ps', f"{host}:{port}")
-                except:
+
+                    return VPNConfig(
+                        raw=line,
+                        protocol=protocol,
+                        host=host,
+                        port=int(port),
+                        name=name
+                    )
+                except Exception as e:
+                    logger.debug(f"Ошибка парсинга VMess: {e}")
                     return None
+
+            # Shadowsocks протокол
             elif line.startswith('ss://'):
                 protocol = 'shadowsocks'
-                host = 'unknown'
-                port = 0
-                name = 'Shadowsocks'
-            else:
-                return None
-                
-            return VPNConfig(
-                raw=line,
-                protocol=protocol,
-                host=host,
-                port=port,
-                name=name
-            )
+                # Простой парсинг SS
+                parts = line.split('@')
+                if len(parts) > 1:
+                    host_port = parts[1].split('#')[0].split(':')
+                    if len(host_port) >= 2:
+                        host = host_port[0]
+                        port = int(host_port[1])
+                        name = line.split('#')[-1] if '#' in line else f"{host}:{port}"
+                    else:
+                        return None
+                else:
+                    return None
+
+                return VPNConfig(
+                    raw=line,
+                    protocol=protocol,
+                    host=host,
+                    port=port,
+                    name=name
+                )
+
+            # Trojan протокол
+            elif line.startswith('trojan://'):
+                protocol = 'trojan'
+                parsed = urllib.parse.urlparse(line)
+                host = parsed.hostname
+                port = parsed.port
+                name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else f"{host}:{port}"
+
+                return VPNConfig(
+                    raw=line,
+                    protocol=protocol,
+                    host=host,
+                    port=port,
+                    name=name
+                )
+
         except Exception as e:
             logger.debug(f"Ошибка парсинга конфигурации: {e}")
             return None
-    
+
+        return None
+
     async def test_tcp_connection(self, host: str, port: int) -> Tuple[bool, float]:
-        """Тестирование TCP подключения"""
-        try:
-            start_time = time.time()
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port),
-                timeout=self.timeout
-            )
-            latency = (time.time() - start_time) * 1000  # в миллисекундах
-            writer.close()
-            await writer.wait_closed()
-            return True, latency
-        except Exception as e:
-            logger.debug(f"TCP тест не удался для {host}:{port} - {e}")
-            return False, float('inf')
-    
-    async def test_http_proxy(self, config: VPNConfig, proxy_url: str) -> Tuple[bool, float]:
-        """Тестирование через HTTP прокси"""
-        try:
-            # Создаем сессию с прокси
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
+        """Тестирование TCP подключения с усреднением"""
+        latencies = []
+
+        for attempt in range(self.test_count):
+            try:
                 start_time = time.time()
-                async with session.get(
-                    self.test_url,
-                    proxy=proxy_url,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout)
-                ) as response:
-                    latency = (time.time() - start_time) * 1000
-                    return response.status == 200, latency
-        except Exception as e:
-            logger.debug(f"HTTP тест не удался для {config.name} - {e}")
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=self.timeout
+                )
+                latency = (time.time() - start_time) * 1000  # в миллисекундах
+                writer.close()
+                await writer.wait_closed()
+                latencies.append(latency)
+
+                # Если первый пинг уже хороший, не ждем остальные
+                if latency < 100:
+                    break
+
+            except asyncio.TimeoutError:
+                logger.debug(f"Таймаут для {host}:{port}")
+                return False, float('inf')
+            except Exception as e:
+                logger.debug(f"Ошибка подключения к {host}:{port} - {e}")
+                return False, float('inf')
+
+        if latencies:
+            # Берем медианное значение (более устойчиво к выбросам)
+            latencies.sort()
+            avg_latency = sum(latencies) / len(latencies)
+            return True, avg_latency
+        else:
             return False, float('inf')
-    
+
     async def test_config(self, config: VPNConfig) -> VPNConfig:
         """Тестирование отдельной конфигурации"""
-        # Сначала тестируем TCP подключение
         tcp_ok, latency = await self.test_tcp_connection(config.host, config.port)
-        
+
         if tcp_ok:
             config.is_alive = True
             config.latency = latency
-            logger.debug(f"✅ {config.name} - работает (latency: {latency:.2f}ms)")
+            logger.info(f"✅ {config.name} - {latency:.0f}ms")
         else:
             logger.debug(f"❌ {config.name} - не работает")
-            
+
         return config
-    
-    async def validate_configs(self, configs: List[VPNConfig], max_concurrent: int = 50) -> List[VPNConfig]:
+
+    async def validate_configs(self, configs: List[VPNConfig], max_concurrent: int = 30) -> List[VPNConfig]:
         """Проверка списка конфигураций с ограничением параллельности"""
         semaphore = asyncio.Semaphore(max_concurrent)
-        
+
         async def test_with_semaphore(config):
             async with semaphore:
                 return await self.test_config(config)
-        
+
         tasks = [test_with_semaphore(config) for config in configs]
         results = await asyncio.gather(*tasks)
-        
+
         # Фильтруем только рабочие
         working = [r for r in results if r.is_alive]
         # Сортируем по задержке
-        working.sort(key=lambda x: x.latency)
-        
+        working.sort()
+
         logger.info(f"Проверено {len(configs)} конфигураций, найдено {len(working)} рабочих")
         return working
 
+
 class SubscriptionManager:
     """Класс для управления подписками"""
-    
+
     def __init__(self, output_dir: str = "subscriptions"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
-        
-    def create_subscription_file(self, configs: List[VPNConfig], filename: str, 
-                                 title: str, max_count: int = None) -> Path:
-        """Создание файла подписки"""
-        if max_count:
-            configs = configs[:max_count]
-            
+
+    def create_subscription_file(self, configs: List[VPNConfig], filename: str,
+                                 title: str, max_count: int = 10) -> Path:
+        """Создание файла подписки с топ N конфигураций"""
+        # Берем только лучшие (с наименьшим пингом)
+        top_configs = configs[:max_count]
+
         filepath = self.output_dir / filename
-        
+
         with open(filepath, 'w', encoding='utf-8') as f:
             # Заголовок подписки
             f.write(f"# profile-title: {title}\n")
             f.write(f"# profile-update-interval: 5\n")
             f.write(f"# Date/Time: {datetime.now().strftime('%Y-%m-%d / %H:%M')}\n")
-            f.write(f"# Количество: {len(configs)}\n")
+            f.write(f"# Total tested: {len(configs)}\n")
+            f.write(f"# Working: {len(top_configs)}\n")
+            f.write(f"# Best latency: {top_configs[0].latency:.0f}ms\n" if top_configs else "# No working configs\n")
             f.write("\n")
-            
-            # Конфигурации
-            for config in configs:
+
+            # Конфигурации с комментариями о пинге
+            for i, config in enumerate(top_configs, 1):
+                f.write(f"# {i}. {config.name} - {config.latency:.0f}ms\n")
                 f.write(f"{config.raw}\n")
-                
-        logger.info(f"Создана подписка: {filepath} ({len(configs)} конфигураций)")
+
+        logger.info(f"Создана подписка: {filepath} (топ {len(top_configs)} из {len(configs)} конфигураций)")
         return filepath
-    
-    def generate_qr_code(self, content: str, filename: str):
-        """Генерация QR кода для подписки (опционально)"""
-        try:
-            import qrcode
-            img = qrcode.make(content)
-            img.save(self.output_dir / filename)
-            logger.info(f"QR код создан: {filename}")
-        except ImportError:
-            logger.warning("Модуль qrcode не установлен. Установите: pip install qrcode[pil]")
-    
-    def create_readme(self, subscriptions: Dict[str, Dict]):
-        """Создание README файла со списком подписок"""
-        readme_path = self.output_dir / "README.md"
-        
-        with open(readme_path, 'w', encoding='utf-8') as f:
-            f.write("# VPN Subscriptions\n\n")
-            f.write(f"Последнее обновление: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write("## Доступные подписки\n\n")
-            
-            for name, info in subscriptions.items():
-                f.write(f"### {name}\n")
-                f.write(f"- **Описание:** {info['description']}\n")
-                f.write(f"- **Количество:** {info['count']}\n")
-                f.write(f"- **Ссылка:** `{info['url']}`\n\n")
-                
-        logger.info(f"Создан README файл: {readme_path}")
 
-class ConfigCollector:
-    """Класс для сбора конфигураций из разных источников"""
-    
-    def __init__(self):
-        self.configs: List[VPNConfig] = []
-        
-    def load_from_file(self, filepath: str) -> List[str]:
-        """Загрузка конфигураций из файла"""
-        with open(filepath, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        return [line.strip() for line in lines if line.strip() and not line.startswith('#')]
-    
-    def load_from_url(self, url: str) -> List[str]:
-        """Загрузка конфигураций из URL"""
-        import requests
-        try:
-            response = requests.get(url, timeout=30)
-            if response.status_code == 200:
-                return [line.strip() for line in response.text.split('\n') 
-                       if line.strip() and not line.startswith('#')]
-        except Exception as e:
-            logger.error(f"Ошибка загрузки из {url}: {e}")
-        return []
-    
-    def filter_by_country(self, configs: List[VPNConfig], country: str) -> List[VPNConfig]:
-        """Фильтрация по стране"""
-        return [c for c in configs if country.lower() in c.name.lower()]
-    
-    def filter_by_cidr(self, configs: List[VPNConfig]) -> List[VPNConfig]:
-        """Фильтрация для белых списков CIDR"""
-        # Здесь можно добавить логику фильтрации по CIDR диапазонам
-        return configs
+    def create_detailed_report(self, configs: List[VPNConfig], filename: str = "report.txt") -> Path:
+        """Создание детального отчета о всех конфигурациях"""
+        filepath = self.output_dir / filename
 
-class GitHubDeployer:
-    """Класс для деплоя на GitHub"""
-    
-    def __init__(self, repo_path: str = "."):
-        self.repo_path = Path(repo_path)
-        
-    def commit_and_push(self, message: str, files: List[Path]):
-        """Коммит и пуш изменений в GitHub"""
-        try:
-            # Добавляем файлы
-            for file in files:
-                subprocess.run(['git', 'add', str(file)], cwd=self.repo_path, check=True)
-            
-            # Коммитим
-            subprocess.run(['git', 'commit', '-m', message], cwd=self.repo_path, check=True)
-            
-            # Пушим
-            subprocess.run(['git', 'push'], cwd=self.repo_path, check=True)
-            
-            logger.info("Изменения успешно отправлены в GitHub")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Ошибка при деплое: {e}")
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write("=" * 60 + "\n")
+            f.write("VPN CONFIGURATIONS TEST REPORT\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 60 + "\n\n")
+
+            f.write(f"Total tested: {len(configs)}\n")
+            working = [c for c in configs if c.is_alive]
+            f.write(f"Working: {len(working)}\n")
+            f.write(f"Failed: {len(configs) - len(working)}\n\n")
+
+            if working:
+                f.write("TOP 10 BEST CONFIGURATIONS (by latency):\n")
+                f.write("-" * 40 + "\n")
+                for i, config in enumerate(working[:10], 1):
+                    f.write(f"{i}. {config.name}\n")
+                    f.write(f"   Protocol: {config.protocol}\n")
+                    f.write(f"   Host: {config.host}:{config.port}\n")
+                    f.write(f"   Latency: {config.latency:.0f}ms\n\n")
+
+            f.write("\nALL WORKING CONFIGURATIONS:\n")
+            f.write("-" * 40 + "\n")
+            for config in working:
+                f.write(f"{config.name} - {config.latency:.0f}ms\n")
+
+        return filepath
+
 
 async def main():
     """Основная функция"""
-    parser = argparse.ArgumentParser(description='VPN Config Validator & Updater')
-    parser.add_argument('--input', '-i', help='Входной файл с конфигурациями')
-    parser.add_argument('--url', '-u', help='URL для загрузки конфигураций')
-    parser.add_argument('--max-configs', type=int, default=150, help='Максимум конфигураций в подписке')
+    parser = argparse.ArgumentParser(description='VPN Config Validator - Top 10 by latency')
+    parser.add_argument('--input', '-i', required=True, help='Входной файл с конфигурациями')
+    parser.add_argument('--max-configs', type=int, default=10,
+                        help='Максимум конфигураций в подписке (по умолчанию 10)')
     parser.add_argument('--output-dir', '-o', default='subscriptions', help='Директория для вывода')
-    parser.add_argument('--deploy', action='store_true', help='Автоматический деплой на GitHub')
+    parser.add_argument('--timeout', type=int, default=5, help='Таймаут проверки в секундах')
+    parser.add_argument('--threads', type=int, default=30, help='Количество параллельных проверок')
     args = parser.parse_args()
-    
-    # Сбор конфигураций
-    collector = ConfigCollector()
-    raw_configs = []
-    
-    if args.input:
-        logger.info(f"Загрузка конфигураций из файла: {args.input}")
-        raw_configs = collector.load_from_file(args.input)
-    elif args.url:
-        logger.info(f"Загрузка конфигураций из URL: {args.url}")
-        raw_configs = collector.load_from_url(args.url)
-    else:
-        logger.error("Необходимо указать --input или --url")
-        return
-    
-    logger.info(f"Загружено {len(raw_configs)} конфигураций")
-    
+
+    start_time = time.time()
+
+    # Загрузка конфигураций
+    logger.info(f"Загрузка конфигураций из {args.input}")
+    with open(args.input, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
     # Парсинг конфигураций
-    validator = VPNConfigValidator()
+    validator = VPNConfigValidator(timeout=args.timeout)
     configs = []
-    for raw in raw_configs:
-        config = validator.parse_config(raw)
+    for line in lines:
+        config = validator.parse_config(line)
         if config:
             configs.append(config)
-    
+
     logger.info(f"Распознано {len(configs)} конфигураций")
-    
+
+    if not configs:
+        logger.error("Не найдено валидных конфигураций!")
+        return
+
     # Проверка работоспособности
-    logger.info("Начинаем проверку конфигураций...")
-    working_configs = await validator.validate_configs(configs, max_concurrent=50)
-    
+    logger.info(f"Начинаем проверку {len(configs)} конфигураций (таймаут: {args.timeout}с)...")
+    logger.info("Это может занять некоторое время...")
+
+    working_configs = await validator.validate_configs(configs, max_concurrent=args.threads)
+
     if not working_configs:
         logger.error("Не найдено рабочих конфигураций!")
         return
-    
+
     # Создание подписок
     manager = SubscriptionManager(args.output_dir)
-    subscriptions = {}
-    
-    # Полная подписка
-    full_file = manager.create_subscription_file(
+
+    # Основная подписка с топ 10
+    main_file = manager.create_subscription_file(
         working_configs,
         "full_subscription.txt",
-        "Full VPN Subscription",
+        f"Top {args.max_configs} VPN Subscriptions (Auto-updated)",
         max_count=args.max_configs
     )
-    subscriptions['Full'] = {
-        'description': 'Полная подписка с лучшими конфигурациями',
-        'count': min(len(working_configs), args.max_configs),
-        'url': str(full_file)
-    }
-    
-    # Подписка для телефона (первые 150)
-    if len(working_configs) > 150:
-        mobile_file = manager.create_subscription_file(
-            working_configs,
-            "mobile_subscription.txt",
-            "Mobile VPN Subscription (Top 150)",
-            max_count=150
-        )
-        subscriptions['Mobile'] = {
-            'description': 'Сжатая подписка для телефона (первые 150)',
-            'count': 150,
-            'url': str(mobile_file)
-        }
-    
-    # Фильтрация по протоколам
-    vless_configs = [c for c in working_configs if c.protocol == 'vless']
-    if vless_configs:
-        vless_file = manager.create_subscription_file(
-            vless_configs,
-            "vless_subscription.txt",
-            "VLESS Only Subscription",
-            max_count=args.max_configs
-        )
-        subscriptions['VLESS'] = {
-            'description': 'Только VLESS протокол',
-            'count': min(len(vless_configs), args.max_configs),
-            'url': str(vless_file)
-        }
-    
-    # Создание README
-    manager.create_readme(subscriptions)
-    
-    # Деплой на GitHub
-    if args.deploy:
-        deployer = GitHubDeployer()
-        files = list(manager.output_dir.glob('*'))
-        deployer.commit_and_push(
-            f"Auto-update subscriptions {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            files
-        )
-    
-    logger.info("Готово!")
+
+    # Детальный отчет
+    report_file = manager.create_detailed_report(working_configs)
+
+    # Создаем также файл с последней версией (для удобства)
+    latest_file = manager.output_dir / "latest_subscription.txt"
+    latest_file.write_text(main_file.read_text(encoding='utf-8'), encoding='utf-8')
+
+    elapsed_time = time.time() - start_time
+
+    # Вывод результатов
+    print("\n" + "=" * 60)
+    print("✅ ПРОВЕРКА ЗАВЕРШЕНА")
+    print("=" * 60)
+    print(f"📊 Всего проверено: {len(configs)} конфигураций")
+    print(f"✅ Рабочих: {len(working_configs)}")
+    print(f"❌ Нерабочих: {len(configs) - len(working_configs)}")
+    print(f"⏱️  Время проверки: {elapsed_time:.1f} секунд")
+    print(f"\n🏆 ТОП-{min(args.max_configs, len(working_configs))} ПО ПИНГУ:")
+
+    for i, config in enumerate(working_configs[:args.max_configs], 1):
+        print(f"   {i}. {config.name} - {config.latency:.0f}ms")
+
+    print(f"\n📁 Файлы сохранены в: {manager.output_dir}/")
+    print(f"   - full_subscription.txt (топ {args.max_configs})")
+    print(f"   - latest_subscription.txt (последняя версия)")
+    print(f"   - report.txt (детальный отчет)")
+
+    # GitHub RAW ссылка
+    print(f"\n🔗 GitHub RAW ссылка для импорта:")
+    print(
+        f"   https://raw.githubusercontent.com/dmeshechkov/vpn-subscriptions/main/subscriptions/full_subscription.txt")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
