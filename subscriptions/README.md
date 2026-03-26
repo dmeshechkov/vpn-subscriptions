@@ -1,38 +1,35 @@
-# 🏳️ WhiteList VPN - Top 10 Configurations
+# 🏳️ WhiteList VPN - Top 15 Configurations
 
-**Last update:** 2026-03-26 16:32:58
+**Last update:** 2026-03-26 17:27:27
 
 ## 📊 Statistics
 
-- Total tested: **439**
-- Working: **387**
-- Failed: **52**
+- Total tested: **376**
+- Working: **322**
+- Failed: **54**
 
-## 🏆 Top 10 by Latency
+## 🏆 Top 15 by Latency
 
 | # | Name | Latency | Source |
 |---|------|---------|--------|
-| 1 | 🇷🇺 Timeweb — #274 | 28ms | vless_lite.txt |
-| 2 | 🇸🇪 Sweden — #1075 | 29ms | vless_lite.txt |
-| 3 | 🇫🇮 Finland — #764 | 29ms | vless_lite.txt |
-| 4 | 🇫🇮 Finland — #762 | 29ms | vless_lite.txt |
-| 5 | 🇷🇺 cloud.ru — #92 | 29ms | vless_lite.txt |
-| 6 | 🇷🇺 Serv.Host — #175 | 29ms | vless_lite.txt |
-| 7 | 🇵🇱 Poland — #970 | 29ms | vless_lite.txt |
-| 8 | 🇷🇺 4vps.su — #86 | 29ms | vless_lite.txt |
-| 9 | 🇫🇮 Finland — #759 | 29ms | vless_lite.txt |
-| 10 | 🇩🇪 Germany — #559 | 30ms | vless_lite.txt |
+| 1 | 🇸🇪 Sweden — #830 | 28ms | vless_lite.txt |
+| 2 | 🇰🇿 Kazakhstan — #630 | 29ms | vless_lite.txt |
+| 3 | 🇷🇺 Timeweb — #160 | 29ms | vless_lite.txt |
+| 4 | 🇫🇮 Finland — #600 | 29ms | vless_lite.txt |
+| 5 | 🇩🇪 Germany — #391 | 29ms | vless_lite.txt |
+| 6 | 🇩🇪 Germany — #419 | 29ms | vless_lite.txt |
+| 7 | 🇵🇱 Poland — #790 | 29ms | vless_lite.txt |
+| 8 | 🇫🇮 Finland — #577 | 29ms | vless_lite.txt |
+| 9 | 🇩🇪 Germany — #414 | 29ms | vless_lite.txt |
+| 10 | 🇩🇪 Germany — #288 | 30ms | vless_lite.txt |
+| 11 | 🇩🇪 Germany — #451 | 30ms | vless_lite.txt |
+| 12 | 🇷🇺 SERVERLUX — #148 | 30ms | vless_lite.txt |
+| 13 | 🇩🇪 Germany — #362 | 30ms | vless_lite.txt |
+| 14 | 🇩🇪 Germany — #407 | 30ms | vless_lite.txt |
+| 15 | 🇷🇸 Serbia — #828 | 30ms | vless_lite.txt |
 
 ## 🔗 Subscription Link
 
 ```
-https://raw.githubusercontent.com/dmeshechkov/vpn-subscriptions/main/subscriptions/whitelist_top10.txt
+https://raw.githubusercontent.com/dmeshechkov/vpn-subscriptions/main/subscriptions/whitelist_top15.txt
 ```
-
-## 📱 How to Use
-
-1. Copy the subscription link above
-2. Open your VPN client (v2rayN, Karing, Streisand, etc.)
-3. Add new subscription and paste the link
-4. Set auto-update interval to 1 hour
-5. Enjoy the fastest connections!
