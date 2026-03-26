@@ -114,7 +114,7 @@ def collect_configs() -> list:
     return all_configs
 
 
-def test_configs(configs: list, max_to_test: int = 150) -> list:
+def test_configs(configs: list, max_to_test: int = 500) -> list:
     """
     Тестирует задержку конфигураций
     Возвращает список работающих, отсортированный по задержке
@@ -149,7 +149,7 @@ def test_configs(configs: list, max_to_test: int = 150) -> list:
     return working
 
 
-def save_subscription(configs: list, max_count: int = 15) -> Path:
+def save_subscription(configs: list, max_count: int = 25) -> Path:
     """
     Сохраняет топ-N конфигураций в файл подписки
     """
@@ -245,14 +245,14 @@ def main():
         return 1
 
     # Шаг 2: Тестирование задержки
-    working_configs = test_configs(all_configs, max_to_test=150)
+    working_configs = test_configs(all_configs, max_to_test=500)
 
     if not working_configs:
         print("\n❌ No working configurations found!")
         return 1
 
     # Шаг 3: Сохранение подписки
-    save_subscription(working_configs, max_count=15)
+    save_subscription(working_configs, max_count=25)
 
     # Шаг 4: Отправка на GitHub
     push_to_github()
