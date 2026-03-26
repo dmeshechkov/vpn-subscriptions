@@ -1,38 +1,30 @@
 #!/usr/bin/env python3
 """
 VPN Config Aggregator - Собирает, тестирует и обновляет топ-15 конфигураций на GitHub
-Запуск: python aggregator.py [--max-configs 15] [--timeout 5] [--push]
+Игнорирует аргументы командной строки для совместимости с GitHub Actions
 """
 
-import asyncio
-import aiohttp
+import requests
 import socket
 import time
-import logging
-import argparse
 import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple, Optional
-from dataclasses import dataclass
-import urllib.parse
-import json
-import base64
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('vpn_updater.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# Игнорируем все аргументы командной строки (чтобы --push не вызывал ошибку)
+if len(sys.argv) > 1:
+    print(f"ℹ️ Ignoring arguments: {' '.join(sys.argv[1:])}")
+    sys.argv = [sys.argv[0]]
 
-# Список источников подписок
-SUBSCRIPTION_SOURCES = [
+print("=" * 60)
+print("🚀 VPN SUBSCRIPTION UPDATER")
+print("=" * 60)
+print(f"📅 Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print()
+
+# Источники подписок
+SOURCES = [
     "https://raw.githubusercontent.com/SilentGhostCodes/WhiteListVpn/refs/heads/main/Whitelist.txt",
     "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/subscriptions/cidr_mobile_1.txt",
@@ -41,190 +33,246 @@ SUBSCRIPTION_SOURCES = [
 ]
 
 
-@dataclass
-class VPNConfig:
-    raw: str
-    protocol: str
-    host: str
-    port: int
-    name: str
-    source: str = ""
-    is_alive: bool = False
-    latency: float = float('inf')
+def test_host(host: str, port: int, timeout: int = 3) -> tuple:
+    """
+    Проверяет доступность хоста и измеряет задержку
+    Возвращает (доступен, задержка_в_ms)
+    """
+    try:
+        start = time.time()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        latency = (time.time() - start) * 1000
+        sock.close()
+        return True, latency
+    except Exception:
+        return False, None
 
-    def __lt__(self, other):
-        return self.latency < other.latency
+
+def parse_vless(line: str) -> dict:
+    """
+    Парсит VLESS конфигурацию, извлекает хост, порт и имя
+    """
+    if not line.startswith('vless://'):
+        return None
+    try:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(line)
+        host = parsed.hostname
+        port = parsed.port
+        # Извлекаем имя из фрагмента (#)
+        if parsed.fragment:
+            name = urllib.parse.unquote(parsed.fragment)
+        else:
+            name = f"{host}:{port}"
+        # Обрезаем слишком длинные имена
+        if len(name) > 50:
+            name = name[:47] + "..."
+        return {
+            'raw': line,
+            'host': host,
+            'port': port,
+            'name': name
+        }
+    except Exception:
+        return None
 
 
-class ConfigCollector:
-    async def fetch_from_url(self, session: aiohttp.ClientSession, url: str) -> List[str]:
+def collect_configs() -> list:
+    """Собирает конфигурации из всех источников"""
+    all_configs = []
+    seen = set()  # Для дедупликации
+
+    print("📥 COLLECTING CONFIGURATIONS")
+    print("-" * 40)
+
+    for source in SOURCES:
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                if response.status == 200:
-                    text = await response.text()
-                    configs = []
-                    for line in text.split('\n'):
-                        line = line.strip()
-                        if line and not line.startswith('#') and not line.startswith('//'):
-                            if any(line.startswith(x) for x in ['vless://', 'vmess://', 'ss://', 'trojan://']):
-                                configs.append(line)
-                    return configs
-                return []
+            print(f"  Loading from: {source.split('/')[-1]}...", end=" ")
+            response = requests.get(source, timeout=30)
+            if response.status_code == 200:
+                count_before = len(all_configs)
+                for line in response.text.split('\n'):
+                    line = line.strip()
+                    if line and not line.startswith('#') and not line.startswith('//'):
+                        config = parse_vless(line)
+                        if config:
+                            # Дедупликация по хосту и порту
+                            key = f"{config['host']}:{config['port']}"
+                            if key not in seen:
+                                seen.add(key)
+                                all_configs.append(config)
+                added = len(all_configs) - count_before
+                print(f"✅ {added} new configs")
+            else:
+                print(f"❌ HTTP {response.status_code}")
         except Exception as e:
-            logger.error(f"Ошибка загрузки {url}: {e}")
-            return []
+            print(f"❌ Error: {e}")
 
-    def parse_config(self, line: str, source: str) -> Optional[VPNConfig]:
-        if not line.startswith('vless://'):
-            return None
-        try:
-            parsed = urllib.parse.urlparse(line)
-            host = parsed.hostname
-            port = parsed.port
-            name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else f"{host}:{port}"
-            if len(name) > 50:
-                name = name[:47] + "..."
-            return VPNConfig(raw=line, protocol='vless', host=host, port=port, name=name, source=source)
-        except:
-            return None
-
-    async def collect_all(self) -> List[VPNConfig]:
-        all_configs = []
-        seen = set()
-        async with aiohttp.ClientSession() as session:
-            for source in SUBSCRIPTION_SOURCES:
-                lines = await self.fetch_from_url(session, source)
-                for line in lines:
-                    config = self.parse_config(line, source)
-                    if config:
-                        key = f"{config.host}:{config.port}"
-                        if key not in seen:
-                            seen.add(key)
-                            all_configs.append(config)
-        logger.info(f"Собрано уникальных конфигураций: {len(all_configs)}")
-        return all_configs
+    print(f"\n📊 Total unique configs collected: {len(all_configs)}")
+    return all_configs
 
 
-class LatencyTester:
-    def __init__(self, timeout: int = 5):
-        self.timeout = timeout
+def test_configs(configs: list, max_to_test: int = 150) -> list:
+    """
+    Тестирует задержку конфигураций
+    Возвращает список работающих, отсортированный по задержке
+    """
+    print("\n🏓 TESTING LATENCY")
+    print("-" * 40)
+    print(f"  Testing first {min(max_to_test, len(configs))} configs...")
+    print()
 
-    async def test_tcp_latency(self, host: str, port: int) -> Tuple[bool, float]:
-        try:
-            start = time.time()
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port),
-                timeout=self.timeout
-            )
-            latency = (time.time() - start) * 1000
-            writer.close()
-            await writer.wait_closed()
-            return True, latency
-        except:
-            return False, float('inf')
+    working = []
 
-    async def test_config(self, config: VPNConfig) -> VPNConfig:
-        alive, latency = await self.test_tcp_latency(config.host, config.port)
+    for i, config in enumerate(configs[:max_to_test]):
+        # Выводим прогресс
+        print(f"  {i + 1:3d}. {config['name'][:40]:40s}...", end=" ", flush=True)
+
+        alive, latency = test_host(config['host'], config['port'])
+
         if alive:
-            config.is_alive = True
-            config.latency = latency
-        return config
+            config['latency'] = latency
+            working.append(config)
+            print(f"✅ {latency:.0f}ms")
+        else:
+            print("❌")
 
-    async def test_all(self, configs: List[VPNConfig], max_concurrent: int = 50) -> List[VPNConfig]:
-        semaphore = asyncio.Semaphore(max_concurrent)
+    # Сортируем по задержке
+    working.sort(key=lambda x: x['latency'])
 
-        async def test_with_semaphore(config):
-            async with semaphore:
-                return await self.test_config(config)
+    print(f"\n📊 Working configs: {len(working)} / {min(max_to_test, len(configs))}")
+    if working:
+        print(f"🏆 Best latency: {working[0]['latency']:.0f}ms")
 
-        tasks = [test_with_semaphore(c) for c in configs]
-        results = await asyncio.gather(*tasks)
-        working = [c for c in results if c.is_alive]
-        working.sort()
-        logger.info(f"Проверено {len(configs)}, рабочих: {len(working)}")
-        return working
+    return working
 
 
-class GitHubUpdater:
-    def __init__(self, repo_path: str = "."):
-        self.repo_path = Path(repo_path)
+def save_subscription(configs: list, max_count: int = 15) -> Path:
+    """
+    Сохраняет топ-N конфигураций в файл подписки
+    """
+    top_configs = configs[:max_count]
 
-    def commit_and_push(self, message: str) -> bool:
-        try:
-            subprocess.run(['git', 'add', 'subscriptions/'], cwd=self.repo_path, check=True, capture_output=True)
-            result = subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=self.repo_path)
-            if result.returncode == 0:
-                logger.info("Нет изменений для коммита")
-                return True
-            subprocess.run(['git', 'commit', '-m', message], cwd=self.repo_path, check=True, capture_output=True)
-            subprocess.run(['git', 'push'], cwd=self.repo_path, check=True, capture_output=True)
-            logger.info(f"✅ Изменения отправлены на GitHub: {message}")
-            return True
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Ошибка Git: {e}")
-            return False
+    # Создаём папку если её нет
+    Path("subscriptions").mkdir(exist_ok=True)
 
-    def create_subscription_file(self, configs: List[VPNConfig], max_count: int = 15) -> Path:
-        top_configs = configs[:max_count]
-        filepath = self.repo_path / "subscriptions" / "whitelist_top15.txt"
-        filepath.parent.mkdir(exist_ok=True)
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write("# profile-title: 🏳️ WhiteList VPN - Top 15\n")
-            f.write("# profile-update-interval: 1\n")
-            f.write(f"# Date/Time: {datetime.now().strftime('%Y-%m-%d / %H:%M')}\n")
-            f.write(f"# Total tested: {len(configs)}\n")
-            f.write(f"# Working: {len(top_configs)}\n")
-            if top_configs:
-                f.write(f"# Best latency: {top_configs[0].latency:.0f}ms\n")
-            f.write("# Auto-updated every hour\n\n")
-            for i, config in enumerate(top_configs, 1):
-                f.write(f"# {i}. {config.name} - {config.latency:.0f}ms\n")
-                f.write(f"{config.raw}\n")
-        logger.info(f"✅ Создан файл: {filepath}")
-        return filepath
+    filepath = Path("subscriptions") / "whitelist_top15.txt"
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        # Заголовок подписки
+        f.write("# profile-title: 🏳️ WhiteList VPN - Top 15\n")
+        f.write("# profile-update-interval: 1\n")
+        f.write(f"# Date/Time: {datetime.now().strftime('%Y-%m-%d / %H:%M')}\n")
+        f.write(f"# Total tested: {len(configs)}\n")
+        f.write(f"# Working: {len(top_configs)}\n")
+        if top_configs:
+            f.write(f"# Best latency: {top_configs[0]['latency']:.0f}ms\n")
+        f.write("# Auto-updated every hour\n")
+        f.write("\n")
+
+        # Конфигурации
+        for i, config in enumerate(top_configs, 1):
+            f.write(f"# {i}. {config['name']} - {config['latency']:.0f}ms\n")
+            f.write(f"{config['raw']}\n")
+
+    print(f"\n✅ Subscription saved: {filepath}")
+    return filepath
 
 
-async def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--max-configs', type=int, default=15)
-    parser.add_argument('--timeout', type=int, default=5)
-    parser.add_argument('--push', action='store_true')
-    args = parser.parse_args()
+def push_to_github() -> bool:
+    """
+    Отправляет изменения на GitHub с предварительным pull
+    """
+    print("\n📤 PUSHING TO GITHUB")
+    print("-" * 40)
 
-    start = time.time()
-    logger.info("🚀 Сбор и проверка конфигураций...")
+    # Настраиваем Git
+    subprocess.run(['git', 'config', '--local', 'user.email', 'github-actions[bot]@users.noreply.github.com'],
+                   capture_output=True)
+    subprocess.run(['git', 'config', '--local', 'user.name', 'github-actions[bot]'],
+                   capture_output=True)
 
-    collector = ConfigCollector()
-    all_configs = await collector.collect_all()
+    # Добавляем файл
+    result = subprocess.run(['git', 'add', 'subscriptions/whitelist_top15.txt'],
+                            capture_output=True)
+    if result.returncode != 0:
+        print("❌ Failed to add file to git")
+        return False
+
+    # Проверяем, есть ли изменения
+    result = subprocess.run(['git', 'diff', '--cached', '--quiet'])
+    if result.returncode == 0:
+        print("ℹ️ No changes to commit")
+        return True
+
+    # Коммитим
+    commit_msg = f'Auto-update {datetime.now().strftime("%Y-%m-%d %H:%M")}'
+    result = subprocess.run(['git', 'commit', '-m', commit_msg], capture_output=True)
+    if result.returncode != 0:
+        print(f"❌ Failed to commit: {result.stderr.decode() if result.stderr else 'unknown error'}")
+        return False
+    print(f"✅ Committed: {commit_msg}")
+
+    # Стягиваем последние изменения с GitHub (важно!)
+    print("🔄 Pulling latest changes...")
+    result = subprocess.run(['git', 'pull', '--rebase'], capture_output=True)
+    if result.returncode != 0:
+        print(f"⚠️ Warning: git pull had issues: {result.stderr.decode() if result.stderr else 'unknown'}")
+        # Продолжаем, возможно конфликтов нет
+
+    # Пушим
+    print("📤 Pushing to GitHub...")
+    result = subprocess.run(['git', 'push'], capture_output=True)
+    if result.returncode != 0:
+        print(f"❌ Failed to push: {result.stderr.decode() if result.stderr else 'unknown error'}")
+        return False
+
+    print("✅ Pushed to GitHub successfully!")
+    return True
+
+
+def main():
+    """Основная функция"""
+    start_time = time.time()
+
+    # Шаг 1: Сбор конфигураций
+    all_configs = collect_configs()
+
     if not all_configs:
-        logger.error("Нет конфигураций")
-        sys.exit(1)
+        print("\n❌ No configurations found!")
+        return 1
 
-    tester = LatencyTester(timeout=args.timeout)
-    working = await tester.test_all(all_configs)
+    # Шаг 2: Тестирование задержки
+    working_configs = test_configs(all_configs, max_to_test=150)
 
-    if not working:
-        logger.error("Нет рабочих конфигураций")
-        sys.exit(1)
+    if not working_configs:
+        print("\n❌ No working configurations found!")
+        return 1
 
-    updater = GitHubUpdater()
-    updater.create_subscription_file(working, max_count=args.max_configs)
+    # Шаг 3: Сохранение подписки
+    save_subscription(working_configs, max_count=15)
 
-    print(f"\n✅ Рабочих: {len(working)}")
-    print(f"🏆 Топ-{args.max_configs}:")
-    for i, c in enumerate(working[:args.max_configs], 1):
-        print(f"   {i}. {c.name[:40]} - {c.latency:.0f}ms")
+    # Шаг 4: Отправка на GitHub
+    push_to_github()
 
-    if args.push:
-        print("\n📤 Отправка на GitHub...")
-        updater.commit_and_push(
-            f"Auto-update: top {args.max_configs} configs ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
-    else:
-        print("\n💡 Для отправки на GitHub добавьте --push")
+    # Вывод итогов
+    elapsed = time.time() - start_time
 
-    print(
-        f"\n🔗 Подписка: https://raw.githubusercontent.com/dmeshechkov/vpn-subscriptions/main/subscriptions/whitelist_top15.txt")
+    print("\n" + "=" * 60)
+    print("📊 FINAL SUMMARY")
+    print("=" * 60)
+    print(f"⏱️  Total time: {elapsed:.1f} seconds")
+    print(f"📥 Configs collected: {len(all_configs)}")
+    print(f"✅ Working configs: {len(working_configs)}")
+    print(f"🏆 Top 15 saved to: subscriptions/whitelist_top15.txt")
+    print("\n🔗 Subscription URL:")
+    print("   https://raw.githubusercontent.com/dmeshechkov/vpn-subscriptions/main/subscriptions/whitelist_top15.txt")
+    print("=" * 60)
+
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(main())
